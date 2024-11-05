@@ -9,9 +9,10 @@ interface StatCardProps {
   icon?: ReactNode;
   subtitle?: string;
   tooltip: string;
+  variant?: 'default' | 'purple';
 }
 
-export function StatCard({ title, value, trend, icon, subtitle, tooltip }: StatCardProps) {
+export function StatCard({ title, value, trend, icon, subtitle, tooltip, variant = 'default' }: StatCardProps) {
   return (
     <TooltipProvider>
       <Tooltip>
@@ -22,7 +23,10 @@ export function StatCard({ title, value, trend, icon, subtitle, tooltip }: StatC
               {icon && <span className="text-lg">{icon}</span>}
               <span className={cn(
                 "text-2xl font-bold",
-                trend === undefined ? "" : trend ? "text-green-500" : "text-red-500"
+                trend === undefined ? "" : trend ? "text-green-500" : "text-red-500",
+                {
+                  "text-purple-600": variant === 'purple'
+                }
               )}>
                 {value}
               </span>

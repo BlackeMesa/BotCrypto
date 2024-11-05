@@ -33,9 +33,11 @@ export interface IndicatorValue {
 }
 
 export type StrategyType = 'ema_cross' | 'rsi_oversold' | 'macd_cross' | 'multi';
+export type TimeframeType = 'all' | '1m' | '3m' | '6m';
 
 export interface StrategyParams {
   type: StrategyType;
+  timeframe: TimeframeType;
   fastEma?: EMAPeriod;
   slowEma?: EMAPeriod;
   rsiPeriod?: RSIPeriod;

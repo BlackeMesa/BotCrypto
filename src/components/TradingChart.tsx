@@ -1,16 +1,19 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { createChart, ColorType, IChartApi, LineStyle, CrosshairMode, Time, ChartOptions, DeepPartial, ISeriesApi } from "lightweight-charts";
 import type { Kline, TradingSignal } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { calculateEMA, calculateRSI, calculateMACD } from "@/lib/trading";
-import { checkMACDSignals } from "@/strategies/MACDStrategy";
+import { compareWithHoldStrategy } from "@/lib/strategies/compareStrategies";
+
 
 interface TradingChartProps {
   data: Kline[];
   signals: TradingSignal[];
   showSignalLabels?: boolean;
+  onTimeRangeSelect?: (from: number, to: number) => void;
+  selectedRange?: { from: number; to: number };
 }
-
+  
 interface IndicatorVisibility {
   ema7: boolean;
   ema25: boolean;
@@ -25,7 +28,13 @@ interface ChartInstance {
   isDisposed: boolean;
 }
 
-export function TradingChart({ data, signals, showSignalLabels = true }: TradingChartProps) {
+function prepareChartData(data: Kline[]) {
+  // Remove duplicates and ensure ascending order
+  const uniqueData = Array.from(new Map(data.map((item) => [item.time, item])).values());
+  return uniqueData.sort((a, b) => a.time - b.time);
+}
+
+export function TradingChart({ data, signals, showSignalLabels = true, onTimeRangeSelect, selectedRange }: TradingChartProps) {
   const mainChartRef = useRef<HTMLDivElement>(null);
   const rsiChartRef = useRef<HTMLDivElement>(null);
   const macdChartRef = useRef<HTMLDivElement>(null);
@@ -44,6 +53,9 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
     rsi: false,
     macd: false,
   });
+
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<number | null>(null);
 
   const cleanupCharts = useCallback(() => {
     Object.values(chartsRef.current).forEach((chart) => {
@@ -67,8 +79,20 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
     }));
   };
 
-  const createChartOptions = useCallback(
-    (height: number, isMainChart: boolean = false): DeepPartial<ChartOptions> => ({
+  useEffect(() => {
+    if (!mainChartRef.current || !data.length) return;
+
+    console.log("Début de la création du graphique");
+
+    // Préparer les données
+    const chartData = prepareChartData(data);
+    if (chartData.length === 0) return;
+
+    // Create main chart avec les options directement
+    const mainHeight = showIndicators.rsi || showIndicators.macd ? 300 : 500;
+    const mainChart = createChart(mainChartRef.current, {
+      width: mainChartRef.current.clientWidth,
+      height: mainHeight,
       layout: {
         background: { type: ColorType.Solid, color: "white" },
         textColor: "black",
@@ -77,64 +101,20 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         vertLines: { color: "rgba(70, 70, 70, 0.2)" },
         horzLines: { color: "rgba(70, 70, 70, 0.2)" },
       },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: {
-          labelVisible: isMainChart,
-        },
-      },
-      rightPriceScale: {
-        borderColor: "rgba(70, 70, 70, 0.4)",
-        scaleMargins: {
-          top: 0.1,
-          bottom: 0.1,
-        },
-      },
       timeScale: {
-        borderColor: "rgba(70, 70, 70, 0.4)",
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: 12,
+        rightOffset: 50,
+        leftOffset: 50,
         barSpacing: 12,
         minBarSpacing: 2,
         fixLeftEdge: true,
         fixRightEdge: true,
-        lockVisibleTimeRangeOnResize: true,
-        rightBarStaysOnScroll: true,
-        visible: isMainChart,
-        borderVisible: isMainChart,
+        borderColor: "rgba(70, 70, 70, 0.4)",
+        timeVisible: true,
+        secondsVisible: false,
       },
-      handleScale: {
-        axisPressedMouseMove: {
-          time: true,
-          price: true,
-        },
-        mouseWheel: true,
-        pinch: true,
-      },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: true,
-      },
-      height,
-    }),
-    []
-  );
-
-  useEffect(() => {
-    if (!mainChartRef.current) return;
-
-    // Cleanup previous charts
-    cleanupCharts();
-
-    // Create main chart
-    const mainHeight = showIndicators.rsi || showIndicators.macd ? 300 : 500;
-    const mainChart = createChart(mainChartRef.current, {
-      ...createChartOptions(mainHeight, true),
-      width: mainChartRef.current.clientWidth,
     });
+
+    console.log("Graphique créé avec options:", mainChart.timeScale().options());
 
     const candlestickSeries = mainChart.addCandlestickSeries({
       upColor: "#26a69a",
@@ -151,7 +131,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
     };
 
     candlestickSeries.setData(
-      data.map((d) => ({
+      chartData.map((d) => ({
         time: d.time as Time,
         open: d.open,
         high: d.high,
@@ -160,18 +140,72 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
       }))
     );
 
+
     // Add signals markers
     if (signals.length > 0) {
-      candlestickSeries.setMarkers(
-        signals.map((signal) => ({
-          time: signal.time as Time,
+      // Fonction utilitaire pour s'assurer que le timestamp est valide
+      const ensureValidTime = (time: number): Time => {
+        const timestamp = time * (time < 1e12 ? 1000 : 1);
+        return Math.floor(timestamp / 1000) as Time;
+      };
+
+      // Créer tous les marqueurs
+      const allMarkers = [
+        // Marqueurs des signaux
+        ...signals.map((signal) => ({
+          time: ensureValidTime(signal.time),
           position: signal.type === "buy" ? "belowBar" : "aboveBar",
           color: signal.type === "buy" ? "#22c55e" : "#ef4444",
           shape: signal.type === "buy" ? "arrowUp" : "arrowDown",
           text: showSignalLabels ? signal.reason : undefined,
           size: 2,
         }))
-      );
+      ];
+
+      // Ajouter les marqueurs Buy & Hold si on a des signaux
+      // (cela signifie qu'une simulation a été lancée)
+      if (signals.length > 0) {
+        // Trouver le premier et le dernier signal pour déterminer la plage
+        const firstSignalTime = Math.min(...data.map(d => d.time));
+        const lastSignalTime = Math.max(...data.map(d => d.time));
+
+        console.log(new Date(firstSignalTime).toLocaleString());
+        console.log(new Date(lastSignalTime).toLocaleString());
+        
+
+        // Trouver les données correspondantes
+       const { from, to } = selectedRange || {};
+        if (from && to) {
+          allMarkers.push(
+            {
+              time: ensureValidTime(from),
+              position: "belowBar",
+              color: "#9333ea",
+              shape: "arrowUp",
+              text: "Buy & Hold Entry",
+              size: 2,
+            },
+            {
+              time: ensureValidTime(to),
+              position: "aboveBar",
+              color: "#9333ea",
+              shape: "arrowDown",
+              text: "Buy & Hold Exit",
+              size: 2,
+            }
+          );
+        }
+      }
+
+      // Trier les marqueurs par ordre chronologique
+      const sortedMarkers = allMarkers.sort((a, b) => {
+        const timeA = typeof a.time === 'number' ? a.time : 0;
+        const timeB = typeof b.time === 'number' ? b.time : 0;
+        return timeA - timeB;
+      });
+
+      // Appliquer les marqueurs triés
+      candlestickSeries.setMarkers(sortedMarkers);
     }
 
     // Add EMA indicators to main chart
@@ -182,7 +216,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         lineWidth: 1,
         title: "EMA 7",
       });
-      const ema7Values = calculateEMA(data, 7);
+      const ema7Values = calculateEMA(chartData, 7);
       ema7Series.setData(ema7Values.map((v) => ({ time: v.time as Time, value: v.value })));
       emaSeriesArray.push(ema7Series);
     }
@@ -193,7 +227,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         lineWidth: 1,
         title: "EMA 25",
       });
-      const ema25Values = calculateEMA(data, 25);
+      const ema25Values = calculateEMA(chartData, 25);
       ema25Series.setData(ema25Values.map((v) => ({ time: v.time as Time, value: v.value })));
       emaSeriesArray.push(ema25Series);
     }
@@ -204,7 +238,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         lineWidth: 1,
         title: "EMA 99",
       });
-      const ema99Values = calculateEMA(data, 99);
+      const ema99Values = calculateEMA(chartData, 99);
       ema99Series.setData(ema99Values.map((v) => ({ time: v.time as Time, value: v.value })));
       emaSeriesArray.push(ema99Series);
     }
@@ -239,7 +273,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         lineStyle: LineStyle.Dotted,
       });
 
-      const rsiValues = calculateRSI(data, 14);
+      const rsiValues = calculateRSI(chartData, 14);
       rsiSeries.setData(rsiValues.map((v) => ({ time: v.time as Time, value: v.value })));
       rsiUpperLevel.setData(rsiValues.map((v) => ({ time: v.time as Time, value: 70 })));
       rsiLowerLevel.setData(rsiValues.map((v) => ({ time: v.time as Time, value: 30 })));
@@ -292,7 +326,7 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
         title: "Signal",
       });
 
-      const macdData = calculateMACD(data);
+      const macdData = calculateMACD(chartData);
       macdSeries.setData(macdData.map((v) => ({ time: v.time as Time, value: v.macd })));
       signalSeries.setData(macdData.map((v) => ({ time: v.time as Time, value: v.signal })));
 
@@ -342,64 +376,66 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
 
     mainChart.subscribeCrosshairMove(handleCrosshairMove);
 
-    // Handle window resize
+    // Gestionnaire de redimensionnement
     const handleResize = () => {
-      if (!mainChartRef.current) return;
-      const width = mainChartRef.current.clientWidth;
-
-      Object.values(chartsRef.current).forEach(({ chart, isDisposed }) => {
-        if (!isDisposed) {
-          chart.applyOptions({ width });
-        }
-      });
+      if (mainChartRef.current) {
+        mainChart.applyOptions({
+          width: mainChartRef.current.clientWidth,
+        });
+        mainChart.timeScale().fitContent();
+      }
     };
 
-    window.addEventListener("resize", handleResize);
+    // Ajouter le gestionnaire de redimensionnement
+    window.addEventListener('resize', handleResize);
 
-    // Initial content fit
-    mainChart.timeScale().fitContent();
-    Object.values(chartsRef.current).forEach(({ chart, isDisposed }) => {
-      if (!isDisposed) {
-        chart.timeScale().fitContent();
-      }
+    // Force un premier ajustement
+    handleResize();
+
+    // Activer le mode de sélection de plage
+    mainChart.applyOptions({
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+      },
     });
 
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      cleanupCharts();
+    // Gestionnaires d'événements pour la sélection
+    const handleClick = (param: MouseEventParams) => {
+      if (!param.time || !onTimeRangeSelect) return;
+
+      if (!isSelecting) {
+        setSelectionStart(param.time as number);
+        setIsSelecting(true);
+      } else {
+        setIsSelecting(false);
+        if (selectionStart) {
+          const from = Math.min(selectionStart, param.time as number);
+          const to = Math.max(selectionStart, param.time as number);
+          onTimeRangeSelect(from, to);
+        }
+        setSelectionStart(null);
+      }
     };
-  }, [data, signals, showSignalLabels, showIndicators, createChartOptions, cleanupCharts]);
 
-  useEffect(() => {
-    if (!macdChartRef.current || !data) return;
+    mainChart.subscribeClick(handleClick);
 
-    // Vérifier que chartsRef.current.macd existe
-    if (!chartsRef.current.macd) return;
+    // Nettoyage
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      mainChart.remove();
+      mainChart.unsubscribeClick(handleClick);
+    };
+  }, [data, signals, showSignalLabels, showIndicators, isSelecting, selectionStart]);
 
-    // Récupérer la série MACD
-    const macdSeries = chartsRef.current.macd.series[0];
-    if (!macdSeries) return;
-
-    // Calculer les signaux MACD
-    const macdSignals = checkMACDSignals(data);
-
-    // Créer les marqueurs
-    const markers = macdSignals.map(signal => ({
-      time: signal.timestamp as Time,
-      position: signal.type === 'buy' ? 'belowBar' : 'aboveBar',
-      color: signal.type === 'buy' ? '#26a69a' : '#ef5350',
-      shape: signal.type === 'buy' ? 'arrowUp' : 'arrowDown',
-      text: signal.type === 'buy' ? 'BUY' : 'SELL',
-      size: 2
-    }));
-
-    // Appliquer les marqueurs à la série MACD
-    macdSeries.setMarkers(markers);
-
-    // Logs pour déboguer
-    console.log('Signaux MACD détectés:', macdSignals);
-    console.log('Marqueurs créés:', markers);
-  }, [data]);
+  const performance = useMemo(() => {
+    if (!data?.length || !signals?.length) return null;
+    return compareWithHoldStrategy(data, signals);
+  }, [data, signals]);
 
   return (
     <div className="relative w-full">
@@ -430,6 +466,11 @@ export function TradingChart({ data, signals, showSignalLabels = true }: Trading
           <div className="font-semibold mb-1">Signal {hoveredSignal.type === "buy" ? "d'achat" : "de vente"}</div>
           <div className="text-sm text-muted-foreground">Prix: ${hoveredSignal.price.toFixed(2)}</div>
           <div className="text-sm text-muted-foreground">Raison: {hoveredSignal.reason}</div>
+        </div>
+      )}
+      {isSelecting && (
+        <div className="absolute top-0 left-0 right-0 bg-blue-500/10 p-2 text-center text-sm">
+          Cliquez pour sélectionner la fin de la période
         </div>
       )}
     </div>

@@ -22,12 +22,18 @@ export function TradingDashboard() {
   const [interval, setInterval] = useState<IntervalKey>('1d');
   const [wsConnection, setWsConnection] = useState<WebSocket | null>(null);
   const [signals, setSignals] = useState<TradingSignal[]>([]);
+  const [selectedTimeRange, setSelectedTimeRange] = useState<{from: number, to: number} | null>(null);
+  const [simulationData, setSimulationData] = useState<Kline[]>([]);
 
   const fetchHistoricalData = async (selectedInterval: IntervalKey) => {
     try {
+      const endTime = Date.now();
+      const startTime = endTime - (4 * 365 * 24 * 60 * 60 * 1000);
+
       const response = await fetch(
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${INTERVALS[selectedInterval].api}&limit=${INTERVALS[selectedInterval].limit}`
+        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${INTERVALS[selectedInterval].api}&startTime=${startTime}&endTime=${endTime}&limit=${INTERVALS[selectedInterval].limit}`
       );
+      
       const data = await response.json();
       const formattedData = data.map((d: any) => ({
         time: d[0] / 1000,
@@ -37,6 +43,7 @@ export function TradingDashboard() {
         close: parseFloat(d[4]),
         volume: parseFloat(d[5]),
       }));
+
       setCandlesticks(formattedData);
       setCurrentPrice(formattedData[formattedData.length - 1].close);
       setPriceChange(
@@ -89,6 +96,24 @@ export function TradingDashboard() {
     }
   };
 
+  const handleTimeRangeSelect = (from: number, to: number) => {
+    const selectedData = candlesticks.filter(
+      candle => candle.time >= from && candle.time <= to
+    );
+
+    if (selectedData.length > 0) {
+      setSelectedTimeRange({ from, to });
+      setSimulationData(selectedData);
+    }
+  };
+
+  const handleReset = () => {
+    setSelectedTimeRange(null);
+    setSignals([]);
+    // Recharger les données initiales si nécessaire
+    fetchHistoricalData(selectedInterval);
+  };
+
   return (
     <div className="container mx-auto p-4 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-4">
@@ -119,13 +144,10 @@ export function TradingDashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         <div className="lg:col-span-3">
-          <TradingChart data={candlesticks} signals={signals} />
+          <TradingChart data={candlesticks} signals={signals} onTimeRangeSelect={handleTimeRangeSelect} selectedRange={selectedTimeRange || undefined} />
         </div>
         <div className="lg:col-span-1">
-          <TradingSimulator 
-            data={candlesticks} 
-            onSignalsGenerated={setSignals}
-          />
+          <TradingSimulator data={simulationData.length > 0 ? simulationData : candlesticks} onSignalsGenerated={setSignals} selectedRange={selectedTimeRange || undefined} onReset={handleReset} />
         </div>
       </div>
 
@@ -135,9 +157,7 @@ export function TradingDashboard() {
             <CardTitle>Volume</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">
-              ${(candlesticks[candlesticks.length - 1]?.volume || 0).toLocaleString()}
-            </div>
+            <div className="text-2xl font-bold">${(candlesticks[candlesticks.length - 1]?.volume || 0).toLocaleString()}</div>
           </CardContent>
         </Card>
         <Card>
@@ -145,9 +165,7 @@ export function TradingDashboard() {
             <CardTitle>Period High</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-green-500">
-              ${Math.max(...candlesticks.map(c => c.high)).toLocaleString()}
-            </div>
+            <div className="text-2xl font-bold text-green-500">${Math.max(...candlesticks.map((c) => c.high)).toLocaleString()}</div>
           </CardContent>
         </Card>
         <Card>
@@ -155,9 +173,7 @@ export function TradingDashboard() {
             <CardTitle>Period Low</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-500">
-              ${Math.min(...candlesticks.map(c => c.low)).toLocaleString()}
-            </div>
+            <div className="text-2xl font-bold text-red-500">${Math.min(...candlesticks.map((c) => c.low)).toLocaleString()}</div>
           </CardContent>
         </Card>
       </div>
